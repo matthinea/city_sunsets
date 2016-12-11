@@ -3,6 +3,7 @@ require 'json'
 require 'timezone'
 require 'httparty'
 require 'dotenv'
+require 'active_support/core_ext/numeric/time'
 require_relative 'us_states'
 
 class MyBot < Ebooks::Bot
@@ -41,30 +42,6 @@ class MyBot < Ebooks::Bot
     end
   end
 
-  def on_message(dm)
-    reply_with_timestamp(dm)
-  end
-
-  def on_follow(user)
-    # follow(user.screen_name)
-  end
-
-  def on_mention(tweet)
-    reply_with_timestamp(tweet)
-  end
-
-  def on_timeline(tweet)
-    # reply(tweet, "nice tweet")
-  end
-
-  def on_favorite(user, tweet)
-    # follow(user.screen_name)
-  end
-
-  def on_retweet(tweet)
-    # follow(tweet.user.screen_name)
-  end
-
 
 
   private
@@ -72,20 +49,67 @@ class MyBot < Ebooks::Bot
   def tweet_major_city
     city = @@cities[@@cities.keys.sample]
     city_name = city['city']
-    latitude = city['lat']
-    longitude = city['lon']
-    local_time = get_pretty_local_time(latitude, longitude)
-    tweet(tweet_text(city_name, local_time))
+    lat = city['lat']
+    long = city['lon']
+
+    local_time = get_local_time(lat, long)
+    next_sun_event = get_next_sun_event(lat, long, local_time)
+    # next_tweet = format_tweet(next_sun_event)
+    # tweet(next_tweet)
   end
 
-  def tweet_minor_city
-    city = @@all_cities.sample
-    city_name = "#{city['name']}, #{city['subcountry']}"
-    geoname_id = city['geonameid']   
-    coords = get_coordinates(geoname_id)
-    local_time = get_pretty_local_time(coords[0], coords[1])
-    tweet(tweet_text(city_name, local_time))
+  def get_next_sun_event(lat, long, local_time)
+    # first check today's sun events
+    search_time = local_time 
+    next_day = false
+    loop do 
+      date = search_time.strftime("%Y-%m-%d")
+      sun_times = get_sun_times(lat, long, date)
+      sunrise_time = Time.parse(sun_times['sunrise'])
+      sunset_time = Time.parse(sun_times['sunset'])
+      binding.pry
+      if next_day
+        sunrise_time += 1.day
+        sunset_time += 1.day
+      end
+      binding.pry
+      seconds_to_sunrise = sunrise_time - local_time
+      seconds_to_sunset = sunset_time - local_time
+
+      # if no sunrise yet, or both passed (2nd loop), return sunrise
+      if seconds_to_sunrise > 0
+        return ["sunrise", stringify_seconds(seconds_to_sunrise)]
+      # if sunrise over but not sunset, return sunset
+      elsif seconds_to_sunset > 0
+        return ["sunset", stringify_seconds(seconds_to_sunset)]
+      else
+        search_time = search_time + 1.day # retry using next day's sun events
+        next_day = true
+      end
+    end
   end
+
+  def stringify_seconds(t)
+    mm, ss = t.divmod(60)
+    hh, mm = mm.divmod(60)
+    dd, hh = hh.divmod(24)
+    "%d days, %d hours, %d minutes and %d seconds" % [dd, hh, mm, ss]
+  end
+
+  def get_sun_times(lat, long, date)
+    base_uri = "http://api.sunrise-sunset.org/json?"
+    request = base_uri + "lat=" + lat + "&lng=" + long + "&date=" + date
+    results = HTTParty.get(request)['results']
+  end
+
+  # def tweet_minor_city
+  #   city = @@all_cities.sample
+  #   city_name = "#{city['name']}, #{city['subcountry']}"
+  #   geoname_id = city['geonameid']   
+  #   coords = get_coordinates(geoname_id)
+  #   # local_time = get_local_time(coords[0], coords[1])
+  #   # tweet(tweet_text(city_name, local_time))
+  # end
 
   def reply_text(city_name, local_time)
     "The time in #{city_name} is #{local_time}."
@@ -102,7 +126,7 @@ class MyBot < Ebooks::Bot
       city_name = get_city_name(message)
       coords = get_coords_from_primary_file(city_name)
       if coords
-        local_time = get_pretty_local_time(coords[0], coords[1])
+        local_time = get_local_time(coords[0], coords[1])
         reply(message, reply_text(city_name, local_time))
       else
         reply_using_secondary_file(city_name, message)
@@ -118,7 +142,7 @@ class MyBot < Ebooks::Bot
       if value['country'].casecmp(area) == 0 || value['subcountry'].casecmp(area) == 0
         if value['name'].casecmp(city) == 0
           coords = get_coordinates(value['geonameid'])
-          local_time = get_pretty_local_time(coords[0], coords[1])
+          local_time = get_local_time(coords[0], coords[1])
           city_name = "#{value['name']}, #{value['subcountry']}"
           reply(message, reply_text(city_name, local_time))
           return 
@@ -131,15 +155,14 @@ class MyBot < Ebooks::Bot
     geoname_id = get_geoname_id(city_name)    
     if geoname_id
       coords = get_coordinates(geoname_id)
-      local_time = get_pretty_local_time(coords[0], coords[1])
+      local_time = get_local_time(coords[0], coords[1])
       reply(message, reply_text(city_name, local_time))
     end
   end
 
-  def get_pretty_local_time(latitude, longitude)
+  def get_local_time(latitude, longitude)
     local_timezone = Timezone.lookup(latitude, longitude)
-    local_time = local_timezone.utc_to_local(Time.now.utc)
-    local_time.strftime("%-l:%M%P, %a. %B %d, %Y")
+    local_timezone.utc_to_local(Time.now.utc)
   end
 
   def get_coords_from_primary_file(city_name)
