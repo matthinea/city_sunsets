@@ -3,8 +3,12 @@ require 'json'
 require 'timezone'
 require 'httparty'
 require 'dotenv'
+require 'time'
+require 'action_view'
+require 'action_view/helpers'
 require 'active_support/core_ext/numeric/time'
 require_relative 'us_states'
+
 
 class MyBot < Ebooks::Bot
 
@@ -32,17 +36,26 @@ class MyBot < Ebooks::Bot
   def on_startup
     # See https://github.com/jmettraux/rufus-scheduler
     scheduler.every '10s' do |job|
-      if rand(10) < 8
+      if rand(10) > 7
         tweet_major_city
-      else
+      else 
         tweet_minor_city
       end
+
       # tweet every ~1-3.5 hours
-      job.next_time = Time.now + rand(60..200) * 61
+      job.next_time = Time.now + rand(480..960) * 60
     end
   end
 
 
+  def on_message(dm)
+    reply(dm, reply_text)
+  end
+
+  def on_mention(tweet)
+    # Reply to a mention
+    # reply(tweet, meta(tweet).reply_prefix + "oh hullo")
+  end
 
   private
 
@@ -51,30 +64,84 @@ class MyBot < Ebooks::Bot
     city_name = city['city']
     lat = city['lat']
     long = city['lon']
+    send_tweet(city_name, lat, long)
+  end
 
+  def tweet_minor_city
+    city = @@all_cities.sample
+    city_name = "#{city['name']}, #{city['subcountry']}"
+    geoname_id = city['geonameid']   
+    coords = get_coordinates(geoname_id)
+    lat = coords[0]
+    long = coords[1]
+    send_tweet(city_name, lat, long)
+  end
+
+  def send_tweet(city_name, lat, long)
+    next_tweet = generate_tweet(city_name, lat, long)
+    tweet(next_tweet)
+  end
+
+  def generate_tweet(city_name, lat, long)
     local_time = get_local_time(lat, long)
     next_sun_event = get_next_sun_event(lat, long, local_time)
-    # next_tweet = format_tweet(next_sun_event)
-    # tweet(next_tweet)
+    next_tweet = format_tweet(city_name, next_sun_event)
+    pretty_print(city_name, local_time, next_sun_event, next_tweet)
+    next_tweet
+  end
+
+  def pretty_print(city_name, local_time, next_sun_event, next_tweet)
+    puts city_name
+    puts 'local time: '
+    puts local_time
+    puts next_sun_event
+    puts next_tweet
+    puts
   end
 
   def get_next_sun_event(lat, long, local_time)
     # first check today's sun events
-    search_time = local_time 
-    next_day = false
+
+    next_day = 0
+    search_date = local_time 
+
     loop do 
-      date = search_time.strftime("%Y-%m-%d")
+      date = search_date.strftime("%Y-%m-%d")
+      puts 'date: ' + date
       sun_times = get_sun_times(lat, long, date)
-      sunrise_time = Time.parse(sun_times['sunrise'])
-      sunset_time = Time.parse(sun_times['sunset'])
-      binding.pry
-      if next_day
-        sunrise_time += 1.day
-        sunset_time += 1.day
+
+      utc_sunrise_time = parse_utc_time(sun_times['sunrise'])
+      utc_sunset_time = parse_utc_time(sun_times['sunset'])
+
+      sunrise_time = utc_to_local(lat, long, utc_sunrise_time)
+      sunset_time = utc_to_local(lat, long, utc_sunset_time)
+
+      # set dates to same day for simplicity
+
+      sunrise_time = Time.parse(sunrise_time.strftime("%H:%M:%S"))
+      sunset_time = Time.parse(sunset_time.strftime("%H:%M:%S"))
+      local_time = Time.parse(local_time.strftime("%H:%M:%S"))
+
+      # if past both times, add days to sunrise_time, sunset_time
+      if next_day > 0
+        sunrise_time = sunrise_time + next_day.day
+        sunset_time = sunset_time + next_day.day
       end
-      binding.pry
+
+      p 'sunrise time: '
+      puts sunrise_time
+      p 'sunset time: '
+      puts sunset_time
+      p 'local time: '
+      puts local_time
+
       seconds_to_sunrise = sunrise_time - local_time
       seconds_to_sunset = sunset_time - local_time
+
+      puts 'seconds to sunrise:'
+      puts seconds_to_sunrise
+      puts 'seconds to sunset:'
+      puts seconds_to_sunset
 
       # if no sunrise yet, or both passed (2nd loop), return sunrise
       if seconds_to_sunrise > 0
@@ -83,43 +150,104 @@ class MyBot < Ebooks::Bot
       elsif seconds_to_sunset > 0
         return ["sunset", stringify_seconds(seconds_to_sunset)]
       else
-        search_time = search_time + 1.day # retry using next day's sun events
-        next_day = true
+        search_date = search_date + 1.day # retry using next day's sun events
+        next_day += 1
       end
     end
   end
+
+
+  def get_sun_times(lat, long, date)
+    base_uri = "http://api.sunrise-sunset.org/json?"
+    request = base_uri + "lat=" + lat.to_s + "&lng=" + long.to_s + "&date=" + date
+    results = HTTParty.get(request)['results']
+    puts 'get_sun_times results: '
+    puts results
+    
+    results
+  end
+
+
+  def format_tweet(city_name, next_sun_event) 
+    cleaned_time = clean_time_string(next_sun_event)
+    event_type = next_sun_event[0]
+    tweet_string = "#{cleaned_time} until #{event_type} in #{city_name}"
+  end
+
+
+  def clean_time_string(next_sun_event) 
+    times_array = next_sun_event[1].split(", ")
+
+    times_array = remove_zero_data(times_array)
+
+    # insert serial 'and' (optional)
+    # times_array[-1] = "and " + times_array[-1] if times_array.length > 1
+
+    cleaned_string = times_array.join(', ')
+
+    # remove serial comma (optional)
+    # cleaned_string = remove_serial_comma(cleaned_string)
+
+    cleaned_string
+  end
+
+
+  def remove_serial_comma(string)
+    comma_count = 0
+    string.chars.each do |char|
+      comma_count += 1 if char == ","
+    end
+    if comma_count > 0 
+      new_comma_count = 0
+      string.chars.each_with_index do |char, index|
+        if char == ","
+          new_comma_count += 1
+          if new_comma_count == comma_count
+            string.slice!(index) 
+            break
+          end
+        end
+      end
+    end
+    string
+  end
+
+
+  def remove_zero_data(times_array)
+    ii = 0
+    while ii < times_array.length 
+      if times_array[ii][0] == "0"
+        times_array.delete_at(ii)
+      else
+        ii += 1
+      end 
+    end
+    times_array
+  end
+
 
   def stringify_seconds(t)
     mm, ss = t.divmod(60)
     hh, mm = mm.divmod(60)
     dd, hh = hh.divmod(24)
-    "%d days, %d hours, %d minutes and %d seconds" % [dd, hh, mm, ss]
+    days = ActionView::Base.new.pluralize(dd, 'day')
+    hours = ActionView::Base.new.pluralize(hh, 'hour')
+    minutes = ActionView::Base.new.pluralize(mm, 'minute')
+    # seconds = ActionView::Base.new.pluralize(ss, 'second')
+    "#{days}, #{hours}, #{minutes}"
   end
 
-  def get_sun_times(lat, long, date)
-    base_uri = "http://api.sunrise-sunset.org/json?"
-    request = base_uri + "lat=" + lat + "&lng=" + long + "&date=" + date
-    results = HTTParty.get(request)['results']
-  end
 
-  # def tweet_minor_city
-  #   city = @@all_cities.sample
-  #   city_name = "#{city['name']}, #{city['subcountry']}"
-  #   geoname_id = city['geonameid']   
-  #   coords = get_coordinates(geoname_id)
-  #   # local_time = get_local_time(coords[0], coords[1])
-  #   # tweet(tweet_text(city_name, local_time))
+
+  # def reply_text(city_name, local_time)
+  #   "The time in #{city_name} is #{local_time}."
   # end
 
-  def reply_text(city_name, local_time)
-    "The time in #{city_name} is #{local_time}."
-  end
+  # def tweet_text(city_name, local_time)
+  #   "The current time in #{city_name} is #{local_time}"
+  # end
 
-  def tweet_text(city_name, local_time)
-    "The current time in #{city_name} is #{local_time}"
-  end
-
-  def reply_with_timestamp(message)
+  def reply_with_sun_data(message)
     if message.text.match(",")
       reply_using_region(message)
     else
@@ -142,9 +270,11 @@ class MyBot < Ebooks::Bot
       if value['country'].casecmp(area) == 0 || value['subcountry'].casecmp(area) == 0
         if value['name'].casecmp(city) == 0
           coords = get_coordinates(value['geonameid'])
-          local_time = get_local_time(coords[0], coords[1])
-          city_name = "#{value['name']}, #{value['subcountry']}"
-          reply(message, reply_text(city_name, local_time))
+          # local_time = get_local_time(coords[0], coords[1])
+          lat = coords[0]
+          long = coords[1]
+          response = generate_tweet(city, lat, long)
+          reply(message, response)
           return 
         end 
       end
@@ -160,9 +290,16 @@ class MyBot < Ebooks::Bot
     end
   end
 
-  def get_local_time(latitude, longitude)
-    local_timezone = Timezone.lookup(latitude, longitude)
-    local_timezone.utc_to_local(Time.now.utc)
+  def get_local_time(lat, long)
+    local_timezone = Timezone.lookup(lat, long)
+    time = local_timezone.time_with_offset(Time.now.utc)
+    time
+  end
+
+  def utc_to_local(lat, long, utc_time)
+    local_timezone = Timezone.lookup(lat, long)
+    time = local_timezone.utc_to_local(utc_time)
+    time
   end
 
   def get_coords_from_primary_file(city_name)
@@ -215,10 +352,20 @@ class MyBot < Ebooks::Bot
     end
   end
 
+
+  # H E L P E R S 
+
+  def parse_utc_time(time_string)
+    time = Time.parse(time_string)
+    utc_offset = Time.zone_offset(time.to_s.split(' ')[-1])
+
+    time.utc + utc_offset
+  end
+
 end
 
 
-MyBot.new("city_timestamps") do |bot|
+MyBot.new("city_suntimes") do |bot|
   bot.access_token = ENV['ACCESS_TOKEN']
   bot.access_token_secret = ENV['ACCESS_TOKEN_SECRET']
 end
