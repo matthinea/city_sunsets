@@ -3,10 +3,12 @@ require 'json'
 require 'timezone'
 require 'httparty'
 require 'dotenv'
+require 'pry-byebug'
 require 'time'
 require 'action_view'
 require 'action_view/helpers'
 require 'active_support/core_ext/numeric/time'
+require 'uri'
 require_relative 'us_states'
 
 
@@ -42,24 +44,24 @@ class MyBot < Ebooks::Bot
         tweet_minor_city
       end
 
-      # tweet every ~1-3.5 hours
+      # tweet every 8 - 16 hours
       job.next_time = Time.now + rand(480..960) * 60
     end
   end
 
 
   def on_message(dm)
-    reply(dm, reply_text)
+    reply_with_sun_data(dm)
   end
 
   def on_mention(tweet)
-    # Reply to a mention
-    # reply(tweet, meta(tweet).reply_prefix + "oh hullo")
+    reply_with_sun_data(tweet)
   end
 
   private
 
   def tweet_major_city
+    puts 'tweeting major city'
     city = @@cities[@@cities.keys.sample]
     city_name = city['city']
     lat = city['lat']
@@ -68,6 +70,7 @@ class MyBot < Ebooks::Bot
   end
 
   def tweet_minor_city
+    puts 'tweeting minor city'
     city = @@all_cities.sample
     city_name = "#{city['name']}, #{city['subcountry']}"
     geoname_id = city['geonameid']   
@@ -79,7 +82,8 @@ class MyBot < Ebooks::Bot
 
   def send_tweet(city_name, lat, long)
     next_tweet = generate_tweet(city_name, lat, long)
-    tweet(next_tweet)
+    next_tweet = URI.unescape(next_tweet)
+    # tweet(next_tweet)
   end
 
   def generate_tweet(city_name, lat, long)
@@ -100,8 +104,6 @@ class MyBot < Ebooks::Bot
   end
 
   def get_next_sun_event(lat, long, local_time)
-    # first check today's sun events
-
     next_day = 0
     search_date = local_time 
 
@@ -143,10 +145,8 @@ class MyBot < Ebooks::Bot
       puts 'seconds to sunset:'
       puts seconds_to_sunset
 
-      # if no sunrise yet, or both passed (2nd loop), return sunrise
       if seconds_to_sunrise > 0
         return ["sunrise", stringify_seconds(seconds_to_sunrise)]
-      # if sunrise over but not sunset, return sunset
       elsif seconds_to_sunset > 0
         return ["sunset", stringify_seconds(seconds_to_sunset)]
       else
@@ -238,24 +238,21 @@ class MyBot < Ebooks::Bot
   end
 
 
-
-  # def reply_text(city_name, local_time)
-  #   "The time in #{city_name} is #{local_time}."
-  # end
-
-  # def tweet_text(city_name, local_time)
-  #   "The current time in #{city_name} is #{local_time}"
-  # end
-
   def reply_with_sun_data(message)
+    puts 'hello'
     if message.text.match(",")
       reply_using_region(message)
     else
+      puts 'here'
       city_name = get_city_name(message)
       coords = get_coords_from_primary_file(city_name)
       if coords
-        local_time = get_local_time(coords[0], coords[1])
-        reply(message, reply_text(city_name, local_time))
+        # local_time = get_local_time(coords[0], coords[1])
+        # reply(message, reply_text(city_name, local_time))
+        coords[0] = lat
+        coords[1] = long
+        response = generate_tweet(city_name, lat, long)
+        reply(message, response)
       else
         reply_using_secondary_file(city_name, message)
       end
@@ -264,17 +261,14 @@ class MyBot < Ebooks::Bot
 
   def reply_using_region(message)
     data = message.text.split(",").map{|m|m.chomp.strip}
-    city = data[0]
+    city_name = data[0]
     area = parse_country_codes(data[1])
     @@all_cities.each do |value|
       if value['country'].casecmp(area) == 0 || value['subcountry'].casecmp(area) == 0
-        if value['name'].casecmp(city) == 0
+        if value['name'].casecmp(city_name) == 0
           coords = get_coordinates(value['geonameid'])
           # local_time = get_local_time(coords[0], coords[1])
-          lat = coords[0]
-          long = coords[1]
-          response = generate_tweet(city, lat, long)
-          reply(message, response)
+          respond_with_data(coords, city_name, message)
           return 
         end 
       end
@@ -285,9 +279,17 @@ class MyBot < Ebooks::Bot
     geoname_id = get_geoname_id(city_name)    
     if geoname_id
       coords = get_coordinates(geoname_id)
-      local_time = get_local_time(coords[0], coords[1])
-      reply(message, reply_text(city_name, local_time))
+      # local_time = get_local_time(coords[0], coords[1])
+      # reply(message, reply_text(city_name, local_time))
+      respond_with_data(coords, city_name, message)
     end
+  end
+
+  def respond_with_data(coords, city_name, message)
+    lat = coords[0]
+    long = coords[1]
+    response = generate_tweet(city_name, lat, long)
+    reply(message, response)
   end
 
   def get_local_time(lat, long)
