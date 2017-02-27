@@ -83,7 +83,8 @@ class MyBot < Ebooks::Bot
   def send_tweet(city_name, lat, long)
     next_tweet = generate_tweet(city_name, lat, long)
     next_tweet = URI.unescape(next_tweet)
-    # tweet(next_tweet)
+    puts next_tweet
+    tweet(next_tweet)
   end
 
   def generate_tweet(city_name, lat, long)
@@ -95,12 +96,11 @@ class MyBot < Ebooks::Bot
   end
 
   def pretty_print(city_name, local_time, next_sun_event, next_tweet)
+    puts
     puts city_name
     puts 'local time: '
     puts local_time
     puts next_sun_event
-    puts next_tweet
-    puts
   end
 
   def get_next_sun_event(lat, long, local_time)
